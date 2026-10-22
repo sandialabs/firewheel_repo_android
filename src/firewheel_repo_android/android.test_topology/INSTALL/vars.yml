@@ -1,0 +1,28 @@
+---
+# Generic APKs used by android.test_topology APK installation tests.
+#
+# These APKs are version-pinned and intentionally generic. They are used only
+# to validate Android package installation behavior in FIREWHEEL.
+#
+# Cached/offline installs may provide these files directly through FIREWHEEL's
+# required_files cache mechanism.
+
+android_test_apks:
+  - filename: "vlc.apk"
+    url: "https://get.videolan.org/vlc-android/3.7.0/VLC-Android-3.7.0-x86_64.apk"
+    checksum_algorithm: "sha256"
+    checksum: "9a7bc6d6d2ea80fed207af48fa57c4ec820038eab7436432b47d94a642294d69"
+
+  - filename: "wikipedia.apk"
+    url: "https://releases.wikimedia.org/mobile/android/wikipedia/stable/wikipedia-50598-r-2026-07-13.apk"
+    checksum_algorithm: "sha256"
+    checksum: "4dd12946938db8e595e673b3b1195571793ee61f8163a5268fc2ee8e325fbee9"
+
+required_files:
+  - destination: "{{ mc_dir }}/vm_resources/vlc.apk"
+    checksum_algorithm: "sha256"
+    checksum: "9a7bc6d6d2ea80fed207af48fa57c4ec820038eab7436432b47d94a642294d69"
+
+  - destination: "{{ mc_dir }}/vm_resources/wikipedia.apk"
+    checksum_algorithm: "sha256"
+    checksum: "4dd12946938db8e595e673b3b1195571793ee61f8163a5268fc2ee8e325fbee9"

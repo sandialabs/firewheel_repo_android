@@ -1,0 +1,448 @@
+---
+- name: Gather minimal host facts for Android INSTALL
+  ansible.builtin.setup:
+    gather_subset:
+      - "!all"
+      - "min"
+
+- name: Normalize Android INSTALL operating system family fact
+  ansible.builtin.set_fact:
+    android_os_family: "{{ ansible_facts.os_family | default(ansible_os_family | default('')) }}"
+
+- name: Validate supported operating system family
+  ansible.builtin.assert:
+    that:
+      - android_os_family in ["Debian", "RedHat"]
+    fail_msg: >-
+      android_base INSTALL currently supports Debian/Ubuntu and RHEL-family
+      systems only. Detected android_os_family={{ android_os_family | default('undefined') }}.
+
+- name: Warn when Android command-line tools checksum is not configured
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: android_cmdline_tools_checksum is empty. The Android command-line
+      tools will be downloaded without checksum verification. For reproducible
+      and safer installs, set android_cmdline_tools_checksum in INSTALL/vars.yml.
+  when: android_cmdline_tools_checksum | default('') | length == 0
+
+# ---------------------------------------------------------------------------
+# Host package installation
+# ---------------------------------------------------------------------------
+
+- name: Install Debian/Ubuntu Android host dependencies
+  become: true
+  ansible.builtin.apt:
+    name: "{{ android_debian_packages }}"
+    state: present
+    update_cache: true
+  when:
+    - android_install_host_packages | default(true) | bool
+    - android_os_family == "Debian"
+
+- name: Install RHEL-family Android host dependencies
+  become: true
+  block:
+    - name: Install RHEL-family packages
+      ansible.builtin.package:
+        name: "{{ android_redhat_packages }}"
+        state: present
+  rescue:
+    - name: Fail with RHEL package guidance
+      ansible.builtin.fail:
+        msg: >-
+          Failed to install RHEL-family Android dependencies:
+          {{ android_redhat_packages }}.
+
+          The most common issue is that the 'android-tools' package is not
+          available from currently enabled repositories. On many RHEL-family
+          systems, adb is provided by the 'android-tools' package from EPEL or
+          another site-approved repository.
+
+          Options:
+            1. Enable the appropriate repository and rerun the INSTALL.
+            2. Remove 'android-tools' from android_redhat_packages if you only
+               want to use the SDK-local adb installed at:
+               {{ android_sdk_root }}/platform-tools/adb
+  when:
+    - android_install_host_packages | default(true) | bool
+    - android_os_family == "RedHat"
+
+# ---------------------------------------------------------------------------
+# Directory layout
+# ---------------------------------------------------------------------------
+
+- name: Create Android SDK and user directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    mode: "{{ item.mode }}"
+  loop:
+    - path: "{{ mc_dir }}/Android"
+      mode: "0755"
+    - path: "{{ android_sdk_root }}"
+      mode: "0755"
+    - path: "{{ android_sdk_root }}/cmdline-tools"
+      mode: "0755"
+    - path: "{{ android_artifacts_dir }}"
+      mode: "0755"
+    - path: "{{ android_user_home }}"
+      mode: "0750"
+    - path: "{{ android_avd_home }}"
+      mode: "0755"
+    - path: "{{ android_vm_resources_dir }}"
+      mode: "0755"
+
+# ---------------------------------------------------------------------------
+# Offline/cache archive extraction
+# ---------------------------------------------------------------------------
+
+- name: Check whether Android SDK archive is available
+  ansible.builtin.stat:
+    path: "{{ android_sdk_archive }}"
+  register: android_sdk_archive_stat
+
+- name: Extract Android SDK archive if available
+  ansible.builtin.unarchive:
+    src: "{{ android_sdk_archive }}"
+    dest: "{{ mc_dir }}"
+    remote_src: true
+    creates: "{{ android_sdkmanager }}"
+  when: android_sdk_archive_stat.stat.exists
+
+- name: Check whether dot-android archive is available
+  ansible.builtin.stat:
+    path: "{{ android_dot_android_archive }}"
+  register: android_dot_android_archive_stat
+
+- name: Check whether dot-android archive has already been extracted
+  ansible.builtin.stat:
+    path: "{{ android_user_home }}/.firewheel_dot_android_archive_extracted"
+  register: android_dot_android_archive_marker_stat
+
+- name: Extract dot-android archive if available
+  ansible.builtin.unarchive:
+    src: "{{ android_dot_android_archive }}"
+    dest: "{{ mc_dir }}"
+    remote_src: true
+  when:
+    - android_dot_android_archive_stat.stat.exists
+    - not android_dot_android_archive_marker_stat.stat.exists
+
+- name: Mark dot-android archive as extracted
+  ansible.builtin.file:
+    path: "{{ android_user_home }}/.firewheel_dot_android_archive_extracted"
+    state: touch
+    mode: "0644"
+  when:
+    - android_dot_android_archive_stat.stat.exists
+    - not android_dot_android_archive_marker_stat.stat.exists
+
+- name: Create Android repositories.cfg
+  ansible.builtin.copy:
+    dest: "{{ android_user_home }}/repositories.cfg"
+    content: ""
+    mode: "0644"
+
+- name: Disable Android analytics for model-component-local Android home
+  ansible.builtin.copy:
+    dest: "{{ android_user_home }}/analytics.settings"
+    content: |
+      hasOptedIn=false
+    mode: "0644"
+
+# ---------------------------------------------------------------------------
+# Termux / Android Bash VM resources
+# ---------------------------------------------------------------------------
+
+- name: Download Termux bootstrap package
+  ansible.builtin.get_url:
+    url: "{{ termux_bootstrap_url }}"
+    dest: "{{ termux_bootstrap_dest }}"
+    checksum: "{{ termux_bootstrap_checksum }}"
+    mode: "0644"
+
+- name: Download Termux app APK
+  ansible.builtin.get_url:
+    url: "{{ termux_app_url }}"
+    dest: "{{ termux_app_dest }}"
+    checksum: "{{ termux_app_checksum }}"
+    mode: "0644"
+
+- name: Extract Termux Bash shared libraries
+  ansible.builtin.unarchive:
+    src: "{{ termux_bootstrap_dest }}"
+    remote_src: true
+    dest: "{{ android_vm_resources_dir }}"
+    include:
+      - "{{ item.archive_path }}"
+    extra_opts:
+      - "-j"
+    creates: "{{ android_vm_resources_dir }}/{{ item.output_filename }}"
+  loop: "{{ termux_bash_libraries }}"
+
+- name: Check whether Android Bash binary already exists
+  ansible.builtin.stat:
+    path: "{{ termux_bash_output }}"
+  register: termux_bash_output_stat
+
+- name: Extract Bash from Termux bootstrap package
+  ansible.builtin.unarchive:
+    src: "{{ termux_bootstrap_dest }}"
+    remote_src: true
+    dest: "{{ android_vm_resources_dir }}"
+    include:
+      - "bin/bash"
+    extra_opts:
+      - "-j"
+  when:
+    - not termux_bash_output_stat.stat.exists
+
+- name: Rename extracted Bash binary
+  ansible.builtin.command:
+    argv:
+      - mv
+      - -f
+      - "{{ android_vm_resources_dir }}/bash"
+      - "{{ termux_bash_output }}"
+  args:
+    creates: "{{ termux_bash_output }}"
+    removes: "{{ android_vm_resources_dir }}/bash"
+  when:
+    - not termux_bash_output_stat.stat.exists
+
+- name: Set executable bit on Android Bash binary
+  ansible.builtin.file:
+    path: "{{ termux_bash_output }}"
+    mode: "0755"
+
+- name: Set permissions on Termux shared libraries
+  ansible.builtin.file:
+    path: "{{ android_vm_resources_dir }}/{{ item.output_filename }}"
+    mode: "0644"
+  loop: "{{ termux_bash_libraries }}"
+
+- name: Verify Termux/Bash VM resource checksums
+  ansible.builtin.stat:
+    path: "{{ item.path }}"
+    checksum_algorithm: sha256
+  loop:
+    - path: "{{ termux_bootstrap_dest }}"
+      checksum: "{{ termux_bootstrap_checksum | regex_replace('^sha256:', '') }}"
+
+    - path: "{{ termux_app_dest }}"
+      checksum: "{{ termux_app_checksum | regex_replace('^sha256:', '') }}"
+
+    - path: "{{ termux_bash_output }}"
+      checksum: "{{ termux_bash_checksum }}"
+
+    - path: "{{ android_vm_resources_dir }}/libandroid-support.so"
+      checksum: "f0f44e60090b07b3536729993fad94bb6127ff1c6f70188f5c6dab6a33b85dda"
+
+    - path: "{{ android_vm_resources_dir }}/libiconv.so"
+      checksum: "90c1158ed3f93ef5b3606faa5df8fdb037ffaab658373bfe155c77871c8ae088"
+
+    - path: "{{ android_vm_resources_dir }}/libncursesw.so.6.5"
+      checksum: "79789fd21d13b82fa87d6373382c815b3d97838962351ab3ec2f7f77edf79c09"
+
+    - path: "{{ android_vm_resources_dir }}/libreadline.so.8.3"
+      checksum: "44579c11be472bae436596e02f0ebbc5e408861d532a050e5cf6891f102d9872"
+  register: termux_resource_checksum_stats
+
+- name: Fail if a Termux/Bash VM resource checksum is incorrect
+  ansible.builtin.fail:
+    msg: >-
+      Checksum mismatch for {{ item.item.path }}.
+      Expected {{ item.item.checksum }}, got {{ item.stat.checksum | default('missing') }}.
+  loop: "{{ termux_resource_checksum_stats.results | default([]) }}"
+  when:
+    - (not item.stat.exists) or (item.stat.checksum != item.item.checksum)
+
+# ---------------------------------------------------------------------------
+# Android command-line tools installation
+# ---------------------------------------------------------------------------
+
+- name: Check whether sdkmanager is already installed
+  ansible.builtin.stat:
+    path: "{{ android_sdkmanager }}"
+  register: android_sdkmanager_stat
+
+- name: Download Android command-line tools
+  ansible.builtin.get_url:
+    url: "{{ android_cmdline_tools_url }}"
+    dest: "{{ android_cmdline_tools_zip }}"
+    checksum: "{{ android_cmdline_tools_checksum if android_cmdline_tools_checksum | default('') | length > 0 else omit }}"
+    mode: "0644"
+  when: not android_sdkmanager_stat.stat.exists
+
+- name: Install Android command-line tools
+  when: not android_sdkmanager_stat.stat.exists
+  block:
+    - name: Remove stale command-line tools temporary unpack directory
+      ansible.builtin.file:
+        path: "{{ android_cmdline_tools_tmp }}"
+        state: absent
+
+    - name: Remove stale command-line tools latest.tmp directory
+      ansible.builtin.file:
+        path: "{{ android_sdk_root }}/cmdline-tools/latest.tmp"
+        state: absent
+
+    - name: Create command-line tools temporary unpack directory
+      ansible.builtin.file:
+        path: "{{ android_cmdline_tools_tmp }}"
+        state: directory
+        mode: "0755"
+
+    - name: Create command-line tools latest.tmp directory
+      ansible.builtin.file:
+        path: "{{ android_sdk_root }}/cmdline-tools/latest.tmp"
+        state: directory
+        mode: "0755"
+
+    - name: Unpack Android command-line tools zip
+      ansible.builtin.unarchive:
+        src: "{{ android_cmdline_tools_zip }}"
+        dest: "{{ android_cmdline_tools_tmp }}"
+        remote_src: true
+
+    - name: Verify unpacked command-line tools layout
+      ansible.builtin.stat:
+        path: "{{ android_cmdline_tools_tmp }}/cmdline-tools/bin/sdkmanager"
+      register: android_cmdline_tools_unpacked_sdkmanager_stat
+      failed_when: not android_cmdline_tools_unpacked_sdkmanager_stat.stat.exists
+
+    - name: Copy command-line tools into latest.tmp
+      ansible.builtin.command:
+        argv:
+          - cp
+          - -a
+          - "{{ android_cmdline_tools_tmp }}/cmdline-tools/."
+          - "{{ android_sdk_root }}/cmdline-tools/latest.tmp/"
+      changed_when: true
+
+    - name: Remove existing command-line tools latest directory
+      ansible.builtin.file:
+        path: "{{ android_sdk_root }}/cmdline-tools/latest"
+        state: absent
+
+    - name: Move latest.tmp into final command-line tools latest directory
+      ansible.builtin.command:
+        argv:
+          - mv
+          - "{{ android_sdk_root }}/cmdline-tools/latest.tmp"
+          - "{{ android_sdk_root }}/cmdline-tools/latest"
+      args:
+        creates: "{{ android_sdkmanager }}"
+
+    - name: Remove command-line tools temporary unpack directory
+      ansible.builtin.file:
+        path: "{{ android_cmdline_tools_tmp }}"
+        state: absent
+
+- name: Verify sdkmanager exists after command-line tools install
+  ansible.builtin.stat:
+    path: "{{ android_sdkmanager }}"
+  register: android_sdkmanager_final_stat
+  failed_when: not android_sdkmanager_final_stat.stat.exists
+
+# ---------------------------------------------------------------------------
+# Android SDK package installation
+# ---------------------------------------------------------------------------
+
+- name: Accept Android SDK licenses
+  ansible.builtin.shell: |
+    set -eu
+    yes | "{{ android_sdkmanager }}" --sdk_root="{{ android_sdk_root }}" --licenses >/dev/null
+  args:
+    executable: /bin/sh
+  environment:
+    HOME: "{{ android_user_home_parent }}"
+    ANDROID_HOME: "{{ android_sdk_root }}"
+    ANDROID_SDK_ROOT: "{{ android_sdk_root }}"
+    ANDROID_USER_HOME: "{{ android_user_home }}"
+    ANDROID_AVD_HOME: "{{ android_avd_home }}"
+  changed_when: false
+
+- name: Build complete Android SDK package list
+  ansible.builtin.set_fact:
+    android_all_sdk_packages: "{{ android_sdk_packages + (android_extra_sdk_packages | default([])) }}"
+
+- name: Check installed Android SDK package marker paths
+  ansible.builtin.stat:
+    path: "{{ item.creates }}"
+  loop: "{{ android_all_sdk_packages }}"
+  register: android_sdk_package_marker_stats
+
+- name: Install missing Android SDK packages
+  ansible.builtin.command:
+    argv:
+      - "{{ android_sdkmanager }}"
+      - "--sdk_root={{ android_sdk_root }}"
+      - "{{ item.item.name }}"
+    stdin: "y\n"
+  loop: "{{ android_sdk_package_marker_stats.results }}"
+  when: not item.stat.exists
+  environment:
+    HOME: "{{ android_user_home_parent }}"
+    ANDROID_HOME: "{{ android_sdk_root }}"
+    ANDROID_SDK_ROOT: "{{ android_sdk_root }}"
+    ANDROID_USER_HOME: "{{ android_user_home }}"
+    ANDROID_AVD_HOME: "{{ android_avd_home }}"
+
+- name: Re-check Android SDK package marker paths
+  ansible.builtin.stat:
+    path: "{{ item.creates }}"
+  loop: "{{ android_all_sdk_packages }}"
+  register: android_sdk_package_final_stats
+
+- name: Fail if any Android SDK package marker path is missing
+  ansible.builtin.fail:
+    msg: >-
+      Android SDK package '{{ item.item.name }}' did not create expected path:
+      {{ item.item.creates }}
+  loop: "{{ android_sdk_package_final_stats.results }}"
+  when: not item.stat.exists
+
+# ---------------------------------------------------------------------------
+# Optional model-component-local ADB key
+# ---------------------------------------------------------------------------
+
+- name: Generate model-component-local ADB key
+  ansible.builtin.command:
+    argv:
+      - "{{ android_sdk_root }}/platform-tools/adb"
+      - "keygen"
+      - "{{ android_user_home }}/adbkey"
+    creates: "{{ android_user_home }}/adbkey"
+  when: android_generate_adb_key | default(true) | bool
+  environment:
+    HOME: "{{ android_user_home_parent }}"
+    ANDROID_HOME: "{{ android_sdk_root }}"
+    ANDROID_SDK_ROOT: "{{ android_sdk_root }}"
+    ANDROID_USER_HOME: "{{ android_user_home }}"
+    ANDROID_AVD_HOME: "{{ android_avd_home }}"
+
+- name: Set ADB private key permissions
+  ansible.builtin.file:
+    path: "{{ android_user_home }}/adbkey"
+    mode: "0600"
+  when: android_generate_adb_key | default(true) | bool
+
+- name: Set ADB public key permissions
+  ansible.builtin.file:
+    path: "{{ android_user_home }}/adbkey.pub"
+    mode: "0644"
+  when: android_generate_adb_key | default(true) | bool
+
+# ---------------------------------------------------------------------------
+# Installation summary
+# ---------------------------------------------------------------------------
+
+- name: Print Android base installation summary
+  ansible.builtin.debug:
+    msg:
+      - "Android SDK root: {{ android_sdk_root }}"
+      - "Android emulator: {{ android_sdk_root }}/emulator/emulator"
+      - "Android adb: {{ android_sdk_root }}/platform-tools/adb"
+      - "Android user home: {{ android_user_home }}"
+      - "Android AVD home: {{ android_avd_home }}"

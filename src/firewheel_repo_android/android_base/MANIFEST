@@ -1,0 +1,13 @@
+attributes:
+  depends: []
+  precedes: []
+  provides: []
+model_component_objects: model_component_objects.py
+model_components:
+  depends:
+  - base_objects
+  - linux.base_objects
+  precedes: []
+name: android.base_objects
+vm_resources:
+- vm_resources/*

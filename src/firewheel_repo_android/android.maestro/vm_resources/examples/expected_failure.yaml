@@ -1,0 +1,9 @@
+appId: com.android.settings
+---
+- launchApp
+
+- extendedWaitUntil:
+    visible: "This text should not exist in Settings"
+    timeout: 5000
+
+- assertVisible: "This text should not exist in Settings"

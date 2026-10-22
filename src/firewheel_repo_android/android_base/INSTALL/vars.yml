@@ -1,0 +1,276 @@
+---
+# Root of the model-component-local Android SDK.
+android_sdk_root: "{{ mc_dir }}/Android/Sdk"
+
+# Model-component-local Android user home.
+#
+# With HOME={{ mc_dir }}, Android tools will naturally use:
+#
+#   {{ mc_dir }}/.android
+#
+# We also set ANDROID_USER_HOME and ANDROID_AVD_HOME explicitly in tasks.
+android_user_home_parent: "{{ mc_dir }}"
+android_user_home: "{{ mc_dir }}/.android"
+android_avd_home: "{{ android_user_home }}/avd"
+
+# Staging/artifact directory for downloaded installer files.
+android_artifacts_dir: "{{ mc_dir }}/artifacts"
+
+# ---------------------------------------------------------------------------
+# Offline/cache install inputs
+# ---------------------------------------------------------------------------
+#
+# Android.tgz is the primary offline/cache input for android_base. It should
+# contain:
+#
+#   Android/Sdk/...
+#
+# and is extracted into {{ mc_dir }}.
+#
+# The .android directory is normally generated locally by tasks.yml. This avoids
+# distributing host-specific/runtime state such as adb keys and adb server files.
+android_sdk_archive_filename: "Android.tgz"
+android_sdk_archive: "{{ android_artifacts_dir }}/{{ android_sdk_archive_filename }}"
+android_sdk_archive_checksum_algorithm: "sha256"
+android_sdk_archive_checksum: "bb1b3ca8d8d8b172a47abeeb34d3bc3623649e5a8a1ca86023543e3301e9a064"
+
+# Optional .android archive.
+#
+# This is not included in install_inputs by default. Users who need a
+# prebuilt/special .android tree may add it to install_inputs in their local
+# vars.yml override.
+#
+# If used, the archive should contain:
+#
+#   .android/...
+#
+# It should not contain sensitive or runtime-specific state unless the user
+# intentionally accepts that risk.
+android_dot_android_archive_filename: "dot-android.tgz"
+android_dot_android_archive: "{{ android_artifacts_dir }}/{{ android_dot_android_archive_filename }}"
+android_dot_android_archive_checksum_algorithm: "sha256"
+android_dot_android_archive_checksum: ""
+
+install_inputs:
+  - destination: "{{ android_sdk_archive }}"
+    source: "{{ mc_name }}/{{ android_sdk_archive_filename }}"
+    checksum_algorithm: "{{ android_sdk_archive_checksum_algorithm }}"
+    checksum: "{{ android_sdk_archive_checksum }}"
+
+# Android command-line tools.
+#
+# This URL is an example pinned command-line-tools package. Update this as needed
+# when intentionally changing SDK tooling versions.
+android_cmdline_tools_zip_name: "commandlinetools-linux-15859902_latest.zip"
+android_cmdline_tools_url: "https://dl.google.com/android/repository/{{ android_cmdline_tools_zip_name }}"
+android_cmdline_tools_zip: "{{ android_artifacts_dir }}/{{ android_cmdline_tools_zip_name }}"
+# If left empty, Ansible will still download the file, but without checksum
+# verification.
+android_cmdline_tools_checksum: "sha256:4e4c464f145a7512b57d088ac6c278c03c9eea610886b35a5e0804e74eedf583"
+
+android_cmdline_tools_tmp: "{{ android_artifacts_dir }}/cmdline-tools-unpack"
+android_sdkmanager: "{{ android_sdk_root }}/cmdline-tools/latest/bin/sdkmanager"
+
+# OS package installation control.
+android_install_host_packages: true
+
+# Debian/Ubuntu host packages.
+#
+# ca-certificates:
+#   Required for reliable HTTPS downloads from Google/GitHub.
+#
+# unzip:
+#   Required by Ansible unarchive for ZIP files such as Android command-line
+#   tools and the Termux bootstrap.
+#
+# openjdk-17-jre-headless:
+#   Required by Android sdkmanager/avdmanager.
+#
+# libx11-dev:
+#   Provides X11 libraries needed by Android emulator installations.
+#
+# adb:
+#   Installed as a system convenience for the VM Resource Handlers.
+#   FIREWHEEL can also use the SDK-local adb:
+#
+#     {{ android_sdk_root }}/platform-tools/adb
+android_debian_packages:
+  - ca-certificates
+  - unzip
+  - openjdk-17-jre-headless
+  - libx11-dev
+  - adb
+
+# RHEL-family host packages.
+#
+# ca-certificates:
+#   Required for reliable HTTPS downloads from Google/GitHub.
+#
+# unzip:
+#   Required by Ansible unarchive for ZIP files.
+#
+# java-17-openjdk-headless:
+#   Required by Android sdkmanager/avdmanager.
+#
+# libX11-devel:
+#   RHEL-family equivalent of the documented libx11-dev prerequisite.
+#
+# android-tools:
+#   Common provider of system adb on RHEL-family systems. Some environments may
+#   require EPEL or another approved repository. FIREWHEEL/minimega could still
+#   use SDK-local adb from {{ android_sdk_root }}/platform-tools/adb.
+android_redhat_packages:
+  - ca-certificates
+  - unzip
+  - java-17-openjdk-headless
+  - libX11-devel
+  - android-tools
+
+# Android platform/system-image defaults used by android_base.
+#
+# For example, the Pixel_9a AVD currently expects:
+#
+#   system-images/android-36/google_apis/x86_64/
+#
+# If a future AVD expects a different API/flavor/arch, update these values or
+# override them from the install invocation.
+android_default_api_level: "36"
+android_default_system_image_flavor: "google_apis"
+android_default_system_image_arch: "x86_64"
+
+# Whether to generate a model-component-local ADB key.
+#
+# This is useful if minimega/ADB is run with HOME pointed at this model component.
+# If your deployment intentionally uses each user's normal ~/.android directory,
+# this can be set to false.
+android_generate_adb_key: true
+
+# Build-tools version to install.
+#
+# This should normally match the default API level, but it is separate because
+# Android build-tools versions do not always map one-to-one with platform API
+# levels.
+android_default_build_tools_version: "36.0.0"
+
+# Android SDK packages to install with sdkmanager.
+#
+# The "creates" path is used to keep installation idempotent. If the path exists,
+# that SDK package is considered installed.
+android_sdk_packages:
+  - name: "platform-tools"
+    creates: "{{ android_sdk_root }}/platform-tools/adb"
+
+  - name: "emulator"
+    creates: "{{ android_sdk_root }}/emulator/emulator"
+
+  - name: "platforms;android-{{ android_default_api_level }}"
+    creates: "{{ android_sdk_root }}/platforms/android-{{ android_default_api_level }}/android.jar"
+
+  - name: "build-tools;{{ android_default_build_tools_version }}"
+    creates: "{{ android_sdk_root }}/build-tools/{{ android_default_build_tools_version }}/source.properties"
+
+  - name: "system-images;android-{{ android_default_api_level }};{{ android_default_system_image_flavor }};{{ android_default_system_image_arch }}"
+    creates: "{{ android_sdk_root }}/system-images/android-{{ android_default_api_level }}/{{ android_default_system_image_flavor }}/{{ android_default_system_image_arch }}/source.properties"
+
+# Optional extra packages. Keep empty by default.
+#
+# Examples:
+#
+# android_extra_sdk_packages:
+#   - name: "platforms;android-35"
+#     creates: "{{ android_sdk_root }}/platforms/android-35/android.jar"
+#
+#   - name: "build-tools;35.0.0"
+#     creates: "{{ android_sdk_root }}/build-tools/35.0.0/aapt"
+#
+#   - name: "system-images;android-35;google_apis;x86_64"
+#     creates: "{{ android_sdk_root }}/system-images/android-35/google_apis/x86_64/source.properties"
+android_extra_sdk_packages: []
+
+# ---------------------------------------------------------------------------
+# Android/Termux VM resources
+# ---------------------------------------------------------------------------
+#
+# These resources support optional Android-side Bash/Termux workflows used by
+# AndroidPhone.install_bash() and related legacy/debugging functionality.
+#
+# The Termux bootstrap ZIP is downloaded so we can extract a known Bash binary
+# and its shared-library dependencies into vm_resources. The Termux APK is kept
+# as a required VM resource for workflows that install or use Termux directly.
+#
+# These files are required for the android_base model component install, even
+# though Bash is not installed into Android guests by default.
+android_vm_resources_dir: "{{ mc_dir }}/vm_resources"
+
+termux_bootstrap_filename: "termux-packages-bootstrap-x86_64.zip"
+termux_bootstrap_url: "https://github.com/termux/termux-packages/releases/download/bootstrap-2026.02.15-r1%2Bapt.android-7/bootstrap-x86_64.zip"
+termux_bootstrap_dest: "{{ android_vm_resources_dir }}/{{ termux_bootstrap_filename }}"
+termux_bootstrap_checksum: "sha256:2fd55501219b0a5ddc7ebc58e58f0475e4d5420cb47b6189dee5916a42f4034e"
+
+termux_app_filename: "termux-app_v0.118.3+github-debug_universal.apk"
+termux_app_url: "https://github.com/termux/termux-app/releases/download/v0.118.3/termux-app_v0.118.3+github-debug_universal.apk"
+termux_app_dest: "{{ android_vm_resources_dir }}/{{ termux_app_filename }}"
+termux_app_checksum: "sha256:7600078440c3c34ef050bc009b00fc3215cb87ec4a449e01a696f74cf4249db2"
+
+termux_bash_output_filename: "bash-android-v5.3.9-x86_64"
+termux_bash_output: "{{ android_vm_resources_dir }}/{{ termux_bash_output_filename }}"
+
+termux_bash_libraries:
+  - archive_path: "lib/libandroid-support.so"
+    output_filename: "libandroid-support.so"
+    checksum: "f0f44e60090b07b3536729993fad94bb6127ff1c6f70188f5c6dab6a33b85dda"
+
+  - archive_path: "lib/libiconv.so"
+    output_filename: "libiconv.so"
+    checksum: "90c1158ed3f93ef5b3606faa5df8fdb037ffaab658373bfe155c77871c8ae088"
+
+  - archive_path: "lib/libncursesw.so.6.5"
+    output_filename: "libncursesw.so.6.5"
+    checksum: "79789fd21d13b82fa87d6373382c815b3d97838962351ab3ec2f7f77edf79c09"
+
+  - archive_path: "lib/libreadline.so.8.3"
+    output_filename: "libreadline.so.8.3"
+    checksum: "44579c11be472bae436596e02f0ebbc5e408861d532a050e5cf6891f102d9872"
+
+termux_bash_checksum: "5d3bc1f4282b66b1e9c1fc737e830e9c1296f3252ca672aa363f8bc5d0ed2144"
+
+# Final files that indicate the base Android installation is usable.
+#
+# FIREWHEEL's INSTALL cache mechanism may inspect required_files. Some entries
+# are downloaded artifacts that can be supplied from cache. Others are SDK marker
+# files produced by the online sdkmanager install.
+required_files:
+  - destination: "{{ android_sdk_root }}/platform-tools/adb"
+  - destination: "{{ android_sdk_root }}/emulator/emulator"
+  - destination: "{{ android_sdkmanager }}"
+  - destination: "{{ android_user_home }}/repositories.cfg"
+  - destination: "{{ android_sdk_root }}/platforms/android-{{ android_default_api_level }}/android.jar"
+  - destination: "{{ android_sdk_root }}/build-tools/{{ android_default_build_tools_version }}/source.properties"
+  - destination: "{{ android_sdk_root }}/system-images/android-{{ android_default_api_level }}/{{ android_default_system_image_flavor }}/{{ android_default_system_image_arch }}/source.properties"
+  - destination: "{{ mc_dir }}/vm_resources/termux-packages-bootstrap-x86_64.zip"
+    checksum_algorithm: "sha256"
+    checksum: "2fd55501219b0a5ddc7ebc58e58f0475e4d5420cb47b6189dee5916a42f4034e"
+
+  - destination: "{{ mc_dir }}/vm_resources/termux-app_v0.118.3+github-debug_universal.apk"
+    checksum_algorithm: "sha256"
+    checksum: "7600078440c3c34ef050bc009b00fc3215cb87ec4a449e01a696f74cf4249db2"
+
+  - destination: "{{ mc_dir }}/vm_resources/bash-android-v5.3.9-x86_64"
+    checksum_algorithm: "sha256"
+    checksum: "5d3bc1f4282b66b1e9c1fc737e830e9c1296f3252ca672aa363f8bc5d0ed2144"
+
+  - destination: "{{ mc_dir }}/vm_resources/libandroid-support.so"
+    checksum_algorithm: "sha256"
+    checksum: "f0f44e60090b07b3536729993fad94bb6127ff1c6f70188f5c6dab6a33b85dda"
+
+  - destination: "{{ mc_dir }}/vm_resources/libiconv.so"
+    checksum_algorithm: "sha256"
+    checksum: "90c1158ed3f93ef5b3606faa5df8fdb037ffaab658373bfe155c77871c8ae088"
+
+  - destination: "{{ mc_dir }}/vm_resources/libncursesw.so.6.5"
+    checksum_algorithm: "sha256"
+    checksum: "79789fd21d13b82fa87d6373382c815b3d97838962351ab3ec2f7f77edf79c09"
+
+  - destination: "{{ mc_dir }}/vm_resources/libreadline.so.8.3"
+    checksum_algorithm: "sha256"
+    checksum: "44579c11be472bae436596e02f0ebbc5e408861d532a050e5cf6891f102d9872"

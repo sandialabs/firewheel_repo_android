@@ -1,0 +1,14 @@
+############################
+# CI: `firewheel_repo_android`
+############################
+
+stages:
+  - upstream
+
+
+# Trigger CI for FIREWHEEL
+firewheel-ci:
+  stage: upstream
+  trigger: firewheel/firewheel
+  only:
+    - main

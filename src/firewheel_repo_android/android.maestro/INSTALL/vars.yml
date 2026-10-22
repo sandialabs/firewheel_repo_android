@@ -1,0 +1,94 @@
+---
+# Root of the model-component-local Maestro installation.
+maestro_root: "{{ mc_dir }}/Maestro"
+
+# Pinned Maestro CLI version.
+maestro_version: "2.8.0"
+
+# Maestro CLI release ZIP.
+#
+# Upstream release URL format:
+#
+#   https://github.com/mobile-dev-inc/maestro/releases/download/cli-<VERSION>/maestro.zip
+#
+maestro_zip_url: "https://github.com/mobile-dev-inc/maestro/releases/download/cli-{{ maestro_version }}/maestro.zip"
+
+# Download/cache staging directory.
+maestro_artifacts_dir: "{{ mc_dir }}/artifacts"
+
+# Keep the downloaded ZIP versioned for reproducibility.
+maestro_zip_name: "maestro-cli-{{ maestro_version }}.zip"
+maestro_zip: "{{ maestro_artifacts_dir }}/{{ maestro_zip_name }}"
+
+
+maestro_zip_checksum_algorithm: "sha256"
+maestro_zip_checksum: "b3e561161904fb391875ca5834d5b22cf0b01c052dd1b408ad83e30d8f8951b3"
+maestro_zip_checksum_ansible: "{{ maestro_zip_checksum_algorithm }}:{{ maestro_zip_checksum }}"
+
+# Versioned install directory.
+maestro_install_dir: "{{ maestro_root }}/maestro-{{ maestro_version }}"
+
+# Stable symlink used by FIREWHEEL and the system wrapper.
+maestro_current_link: "{{ maestro_root }}/current"
+
+# Maestro binary after install.
+maestro_bin: "{{ maestro_current_link }}/bin/maestro"
+
+# Temporary extraction directory.
+maestro_extract_tmp: "{{ maestro_artifacts_dir }}/maestro-unpack"
+
+# Host package installation control.
+maestro_install_host_packages: true
+
+# Create a host-global wrapper so non-interactive FIREWHEEL host-based resources
+# can find maestro on PATH without relying on ~/.bashrc or ~/.zshrc.
+maestro_create_system_wrapper: true
+
+# Wrapper path expected to be available on PATH.
+#
+# The current android_maestro runner defaults to invoking:
+#
+#   maestro
+#
+# so this wrapper is the normal supported configuration.
+maestro_system_wrapper: "/usr/local/bin/maestro"
+
+# Optional explicit JAVA_HOME.
+#
+# If empty, tasks.yml infers JAVA_HOME from the selected java executable.
+maestro_java_home: ""
+
+# Debian/Ubuntu dependencies.
+maestro_debian_packages:
+  - ca-certificates
+  - unzip
+  - openjdk-17-jre-headless
+
+# RHEL-family dependencies.
+maestro_redhat_packages:
+  - ca-certificates
+  - unzip
+  - java-17-openjdk-headless
+
+# ---------------------------------------------------------------------------
+# Cacheable install inputs
+# ---------------------------------------------------------------------------
+install_inputs:
+  - destination: "{{ maestro_zip }}"
+    source: "{{ mc_name }}/{{ maestro_zip_name }}"
+    checksum_algorithm: "{{ maestro_zip_checksum_algorithm }}"
+    checksum: "{{ maestro_zip_checksum }}"
+
+# ---------------------------------------------------------------------------
+# Final installation markers
+# ---------------------------------------------------------------------------
+#
+# These files indicate that android_maestro is installed.
+#
+# NOTE:
+#   This assumes maestro_create_system_wrapper=true. If a deployment disables
+#   the system wrapper, it should also override required_files.
+required_files:
+  - destination: "{{ maestro_bin }}"
+
+  - destination: "{{ maestro_system_wrapper }}"

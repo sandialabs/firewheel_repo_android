@@ -1,0 +1,13 @@
+name: android.mixed_test_topology
+attributes:
+    depends:
+        - graph
+    provides:
+        - topology
+model_components:
+    depends:
+        - base_objects
+        - android.base_objects
+        - android.pixel9a
+        - linux.ubuntu2204
+plugin: plugin.py

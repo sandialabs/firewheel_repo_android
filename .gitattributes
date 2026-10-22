@@ -1,0 +1,8 @@
+*.tgz filter=lfs diff=lfs merge=lfs -text
+*.apk filter=lfs diff=lfs merge=lfs -text
+*.zip filter=lfs diff=lfs merge=lfs -text
+bash-android-v5.3.9-x86_64 filter=lfs diff=lfs merge=lfs -text
+libncursesw.so.6.5 filter=lfs diff=lfs merge=lfs -text
+libreadline.so.8.3 filter=lfs diff=lfs merge=lfs -text
+libandroid-support.so filter=lfs diff=lfs merge=lfs -text
+libiconv.so filter=lfs diff=lfs merge=lfs -text

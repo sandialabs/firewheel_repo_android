@@ -1,0 +1,14 @@
+---
+- name: Create android.test_topology vm_resources directory
+  ansible.builtin.file:
+    path: "{{ mc_dir }}/vm_resources"
+    state: directory
+    mode: "0755"
+
+- name: Download generic Android test APKs
+  ansible.builtin.get_url:
+    url: "{{ item.url }}"
+    dest: "{{ mc_dir }}/vm_resources/{{ item.filename }}"
+    checksum: "{{ item.checksum_algorithm }}:{{ item.checksum }}"
+    mode: "0644"
+  loop: "{{ android_test_apks }}"

@@ -1,0 +1,331 @@
+---
+- name: Gather minimal host facts for Maestro INSTALL
+  ansible.builtin.setup:
+    gather_subset:
+      - "!all"
+      - "min"
+
+- name: Normalize Maestro INSTALL operating system family fact
+  ansible.builtin.set_fact:
+    maestro_os_family: "{{ ansible_facts.os_family | default(ansible_os_family | default('')) }}"
+
+- name: Validate supported operating system family
+  ansible.builtin.assert:
+    that:
+      - maestro_os_family in ["Debian", "RedHat"]
+    fail_msg: >-
+      android_maestro INSTALL currently supports Debian/Ubuntu and RHEL-family
+      systems only. Detected maestro_os_family={{ maestro_os_family | default('undefined') }}.
+
+# ---------------------------------------------------------------------------
+# Host package installation
+# ---------------------------------------------------------------------------
+
+- name: Install Debian/Ubuntu Maestro host dependencies
+  become: true
+  ansible.builtin.apt:
+    name: "{{ maestro_debian_packages }}"
+    state: present
+    update_cache: true
+  when:
+    - maestro_install_host_packages | default(true) | bool
+    - maestro_os_family == "Debian"
+
+- name: Install RHEL-family Maestro host dependencies
+  become: true
+  ansible.builtin.package:
+    name: "{{ maestro_redhat_packages }}"
+    state: present
+  when:
+    - maestro_install_host_packages | default(true) | bool
+    - maestro_os_family == "RedHat"
+
+# ---------------------------------------------------------------------------
+# Java validation
+# ---------------------------------------------------------------------------
+
+- name: Verify java is available
+  ansible.builtin.command:
+    argv:
+      - java
+      - -version
+  changed_when: false
+
+- name: Query Java specification version
+  ansible.builtin.shell: |
+    set -eu
+    java -XshowSettings:properties -version 2>&1 \
+      | sed -n 's/^[[:space:]]*java.specification.version = //p' \
+      | tail -n 1
+  args:
+    executable: /bin/sh
+  register: maestro_java_spec_version
+  changed_when: false
+
+- name: Validate Java 17 or newer
+  ansible.builtin.assert:
+    that:
+      - maestro_java_spec_version.stdout is version('17', '>=')
+    fail_msg: >-
+      Maestro requires Java 17 or newer. Detected java.specification.version={{
+      maestro_java_spec_version.stdout | default('unknown') }}.
+
+- name: Detect JAVA_HOME when not explicitly configured
+  ansible.builtin.shell: |
+    set -eu
+    java_bin="$(command -v java)"
+    java_real="$(readlink -f "$java_bin")"
+    dirname "$(dirname "$java_real")"
+  args:
+    executable: /bin/sh
+  register: maestro_detected_java_home
+  changed_when: false
+  when: maestro_java_home | default('') | length == 0
+
+- name: Set effective JAVA_HOME
+  ansible.builtin.set_fact:
+    maestro_effective_java_home: >-
+      {{
+        maestro_java_home
+        if maestro_java_home | default('') | length > 0
+        else maestro_detected_java_home.stdout
+      }}
+
+- name: Print detected Maestro Java configuration
+  ansible.builtin.debug:
+    msg:
+      - "Java specification version: {{ maestro_java_spec_version.stdout }}"
+      - "JAVA_HOME for Maestro wrapper: {{ maestro_effective_java_home }}"
+
+# ---------------------------------------------------------------------------
+# Directory layout
+# ---------------------------------------------------------------------------
+
+- name: Create Maestro directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    mode: "0755"
+  loop:
+    - "{{ maestro_root }}"
+    - "{{ maestro_artifacts_dir }}"
+
+# ---------------------------------------------------------------------------
+# Maestro CLI ZIP input
+# ---------------------------------------------------------------------------
+#
+# With install_inputs support, maestro_zip may already have been retrieved from
+# cache before tasks.yml runs. If it is present and checksum-valid, do not try to
+# download it. This allows offline installs from cached inputs.
+
+- name: Check whether Maestro CLI ZIP is already available
+  ansible.builtin.stat:
+    path: "{{ maestro_zip }}"
+    checksum_algorithm: "{{ maestro_zip_checksum_algorithm }}"
+  register: maestro_zip_stat
+
+- name: Validate cached Maestro CLI ZIP checksum
+  ansible.builtin.assert:
+    that:
+      - maestro_zip_stat.stat.exists
+      - maestro_zip_stat.stat.checksum == maestro_zip_checksum
+    fail_msg: >-
+      Cached Maestro ZIP exists but failed checksum validation.
+      Path={{ maestro_zip }}
+      Expected={{ maestro_zip_checksum }}
+      Actual={{ maestro_zip_stat.stat.checksum | default('missing') }}
+  when: maestro_zip_stat.stat.exists
+
+- name: Download Maestro CLI ZIP when not available from cache
+  ansible.builtin.get_url:
+    url: "{{ maestro_zip_url }}"
+    dest: "{{ maestro_zip }}"
+    checksum: "{{ maestro_zip_checksum_ansible }}"
+    mode: "0644"
+  when: not maestro_zip_stat.stat.exists
+
+- name: Re-check Maestro CLI ZIP after download/cache retrieval
+  ansible.builtin.stat:
+    path: "{{ maestro_zip }}"
+    checksum_algorithm: "{{ maestro_zip_checksum_algorithm }}"
+  register: maestro_zip_final_stat
+
+- name: Fail if Maestro CLI ZIP is missing or checksum-invalid
+  ansible.builtin.fail:
+    msg: >-
+      Maestro ZIP is missing or checksum-invalid.
+      Path={{ maestro_zip }}
+      Expected={{ maestro_zip_checksum }}
+      Actual={{ maestro_zip_final_stat.stat.checksum | default('missing') }}
+  when:
+    - (not maestro_zip_final_stat.stat.exists) or
+      (maestro_zip_final_stat.stat.checksum != maestro_zip_checksum)
+
+- name: Verify Maestro ZIP archive integrity
+  ansible.builtin.command:
+    argv:
+      - unzip
+      - -qt
+      - "{{ maestro_zip }}"
+  changed_when: false
+
+# ---------------------------------------------------------------------------
+# Install Maestro CLI
+# ---------------------------------------------------------------------------
+
+- name: Check whether Maestro version is already installed
+  ansible.builtin.stat:
+    path: "{{ maestro_install_dir }}/bin/maestro"
+  register: maestro_installed_stat
+
+- name: Install Maestro CLI from ZIP
+  when: not maestro_installed_stat.stat.exists
+  block:
+    - name: Remove stale Maestro extraction directory
+      ansible.builtin.file:
+        path: "{{ maestro_extract_tmp }}"
+        state: absent
+
+    - name: Create Maestro extraction directory
+      ansible.builtin.file:
+        path: "{{ maestro_extract_tmp }}"
+        state: directory
+        mode: "0755"
+
+    - name: Extract Maestro ZIP
+      ansible.builtin.unarchive:
+        src: "{{ maestro_zip }}"
+        dest: "{{ maestro_extract_tmp }}"
+        remote_src: true
+
+    - name: Verify extracted Maestro layout
+      ansible.builtin.stat:
+        path: "{{ maestro_extract_tmp }}/maestro/bin/maestro"
+      register: maestro_extracted_bin_stat
+      failed_when: not maestro_extracted_bin_stat.stat.exists
+
+    - name: Remove stale Maestro versioned install directory
+      ansible.builtin.file:
+        path: "{{ maestro_install_dir }}"
+        state: absent
+
+    - name: Create Maestro versioned install directory
+      ansible.builtin.file:
+        path: "{{ maestro_install_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Copy Maestro files into versioned install directory
+      ansible.builtin.command:
+        argv:
+          - cp
+          - -a
+          - "{{ maestro_extract_tmp }}/maestro/."
+          - "{{ maestro_install_dir }}/"
+      changed_when: true
+
+    - name: Remove Maestro extraction directory
+      ansible.builtin.file:
+        path: "{{ maestro_extract_tmp }}"
+        state: absent
+
+- name: Ensure Maestro binary is executable
+  ansible.builtin.file:
+    path: "{{ maestro_install_dir }}/bin/maestro"
+    mode: "0755"
+
+- name: Inspect Maestro current path
+  ansible.builtin.stat:
+    path: "{{ maestro_current_link }}"
+    follow: false
+  register: maestro_current_link_stat
+
+- name: Remove stale Maestro current directory or file
+  ansible.builtin.file:
+    path: "{{ maestro_current_link }}"
+    state: absent
+  when:
+    - maestro_current_link_stat.stat.exists
+    - not maestro_current_link_stat.stat.islnk | default(false)
+
+- name: Update Maestro current symlink
+  ansible.builtin.file:
+    src: "{{ maestro_install_dir }}"
+    dest: "{{ maestro_current_link }}"
+    state: link
+    force: true
+
+# ---------------------------------------------------------------------------
+# System wrapper
+# ---------------------------------------------------------------------------
+
+- name: Create system Maestro wrapper
+  become: true
+  ansible.builtin.copy:
+    dest: "{{ maestro_system_wrapper }}"
+    mode: "0755"
+    content: |
+      #!/bin/sh
+      # FIREWHEEL-managed Maestro wrapper.
+      #
+      # This wrapper intentionally avoids relying on interactive shell startup
+      # files such as ~/.bashrc or ~/.zshrc. FIREWHEEL host-based VM resources
+      # run non-interactively and need maestro to be available directly on PATH.
+
+      export JAVA_HOME="{{ maestro_effective_java_home }}"
+      exec "{{ maestro_bin }}" "$@"
+  when: maestro_create_system_wrapper | default(true) | bool
+
+# ---------------------------------------------------------------------------
+# Verification
+# ---------------------------------------------------------------------------
+
+- name: Verify model-component-local Maestro binary
+  ansible.builtin.command:
+    argv:
+      - "{{ maestro_bin }}"
+      - "--help"
+  environment:
+    JAVA_HOME: "{{ maestro_effective_java_home }}"
+  changed_when: false
+
+- name: Verify system Maestro wrapper
+  ansible.builtin.command:
+    argv:
+      - "{{ maestro_system_wrapper }}"
+      - "--help"
+  changed_when: false
+  when: maestro_create_system_wrapper | default(true) | bool
+
+- name: Capture Maestro version
+  ansible.builtin.command:
+    argv:
+      - "{{ maestro_system_wrapper if maestro_create_system_wrapper | default(true) | bool else maestro_bin }}"
+      - "--version"
+  register: maestro_version_result
+  changed_when: false
+  failed_when: false
+
+- name: Verify adb is available for host-side Maestro runner
+  ansible.builtin.command:
+    argv:
+      - adb
+      - version
+  changed_when: false
+
+# ---------------------------------------------------------------------------
+# Installation summary
+# ---------------------------------------------------------------------------
+
+- name: Print Maestro installation summary
+  ansible.builtin.debug:
+    msg:
+      - "Maestro version: {{ maestro_version }}"
+      - "Maestro root: {{ maestro_root }}"
+      - "Maestro install dir: {{ maestro_install_dir }}"
+      - "Maestro current symlink: {{ maestro_current_link }}"
+      - "Maestro binary: {{ maestro_bin }}"
+      - "Maestro system wrapper: {{ maestro_system_wrapper if maestro_create_system_wrapper | default(true) | bool else 'disabled' }}"
+      - "Maestro ZIP: {{ maestro_zip }}"
+      - "Maestro version output: {{ maestro_version_result.stdout | default('unavailable') }}"
+      - "JAVA_HOME: {{ maestro_effective_java_home }}"

@@ -1,0 +1,20 @@
+appId: com.android.settings
+---
+- launchApp
+
+- extendedWaitUntil:
+    visible: "Network & internet"
+    timeout: 15000
+
+- tapOn:
+    id: "com.android.settings:id/search_action_bar"
+
+- extendedWaitUntil:
+    visible: "Search settings"
+    timeout: 10000
+
+- inputText: "wifi"
+
+- assertVisible: "wifi"
+
+- takeScreenshot: settings-search

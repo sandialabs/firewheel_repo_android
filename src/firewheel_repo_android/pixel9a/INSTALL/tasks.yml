@@ -1,0 +1,439 @@
+---
+# ---------------------------------------------------------------------------
+# Locate android_base / Android SDK
+# ---------------------------------------------------------------------------
+
+- name: Initialize Android SDK discovery facts
+  ansible.builtin.set_fact:
+    android_base_dir_effective: "{{ android_base_dir_override | default('') }}"
+    android_sdk_root_effective: "{{ android_sdk_root_override | default('') }}"
+
+- name: Query FIREWHEEL for android_base model component directory
+  ansible.builtin.shell: |
+    set -eu
+
+    firewheel mc list -p -m -k "name={{ android_base_mc_name }}" |
+      awk '$1 == "{{ android_base_mc_name }}" {print $2; exit}'
+  args:
+    executable: /bin/sh
+  register: android_base_dir_query
+  changed_when: false
+  when:
+    - android_sdk_root_effective | length == 0
+    - android_base_dir_effective | length == 0
+
+- name: Set detected android_base directory
+  ansible.builtin.set_fact:
+    android_base_dir_effective: "{{ android_base_dir_query.stdout | trim }}"
+  when:
+    - android_sdk_root_effective | length == 0
+    - android_base_dir_effective | length == 0
+    - android_base_dir_query.stdout is defined
+    - android_base_dir_query.stdout | trim | length > 0
+
+- name: Set Android SDK root from explicit or detected android_base directory
+  ansible.builtin.set_fact:
+    android_sdk_root_effective: "{{ android_base_dir_effective }}/Android/Sdk"
+  when:
+    - android_sdk_root_effective | length == 0
+    - android_base_dir_effective | length > 0
+
+- name: Fail if Android SDK root could not be determined
+  ansible.builtin.fail:
+    msg: >-
+      Unable to determine android_base Android SDK root.
+
+      Tried:
+        * android_sdk_root_override={{ android_sdk_root_override | default('') }}
+        * android_base_dir_override={{ android_base_dir_override | default('') }}
+        * firewheel mc list -p -m -k name={{ android_base_mc_name }}
+
+      FIREWHEEL detected android_base_dir_query.stdout was:
+
+      {{ android_base_dir_query.stdout | default('NO FIREWHEEL OUTPUT') }}
+
+      Set android_sdk_root_override or android_base_dir_override in
+      INSTALL/vars.yml if auto-detection is not reliable in this environment.
+  when: android_sdk_root_effective | length == 0
+
+- name: Set Android tool paths
+  ansible.builtin.set_fact:
+    android_sdkmanager: "{{ android_sdk_root_effective }}/cmdline-tools/latest/bin/sdkmanager"
+    android_avdmanager: "{{ android_sdk_root_effective }}/cmdline-tools/latest/bin/avdmanager"
+    android_emulator: "{{ android_sdk_root_effective }}/emulator/emulator"
+    android_mksdcard: "{{ android_sdk_root_effective }}/emulator/mksdcard"
+
+- name: Print detected Android SDK paths
+  ansible.builtin.debug:
+    msg:
+      - "android_base_dir_effective={{ android_base_dir_effective }}"
+      - "android_sdk_root_effective={{ android_sdk_root_effective }}"
+      - "android_sdkmanager={{ android_sdkmanager }}"
+      - "android_avdmanager={{ android_avdmanager }}"
+      - "android_emulator={{ android_emulator }}"
+
+- name: Verify Android SDK manager exists
+  ansible.builtin.stat:
+    path: "{{ android_sdkmanager }}"
+  register: pixel_sdkmanager_stat
+  failed_when: not pixel_sdkmanager_stat.stat.exists
+
+- name: Verify Android AVD manager exists
+  ansible.builtin.stat:
+    path: "{{ android_avdmanager }}"
+  register: pixel_avdmanager_stat
+  failed_when: not pixel_avdmanager_stat.stat.exists
+
+- name: Verify Android emulator exists
+  ansible.builtin.stat:
+    path: "{{ android_emulator }}"
+  register: pixel_emulator_stat
+  failed_when: not pixel_emulator_stat.stat.exists
+
+# ---------------------------------------------------------------------------
+# Local Pixel component directories
+# ---------------------------------------------------------------------------
+
+- name: Create local Pixel AVD home directory
+  ansible.builtin.file:
+    path: "{{ pixel_avd_home }}"
+    state: directory
+    mode: "0755"
+
+- name: Create local Android tool home for Pixel install
+  ansible.builtin.file:
+    path: "{{ mc_dir }}/.android"
+    state: directory
+    mode: "0755"
+
+- name: Create local Android repositories.cfg if missing
+  ansible.builtin.copy:
+    dest: "{{ mc_dir }}/.android/repositories.cfg"
+    content: ""
+    mode: "0644"
+    force: false
+
+# ---------------------------------------------------------------------------
+# Ensure Pixel-required SDK packages are installed in android_base SDK
+# ---------------------------------------------------------------------------
+
+- name: Accept Android SDK licenses for Pixel AVD dependencies
+  ansible.builtin.shell: |
+    set -eu
+    yes | "{{ android_sdkmanager }}" --sdk_root="{{ android_sdk_root_effective }}" --licenses >/dev/null
+  args:
+    executable: /bin/sh
+  environment:
+    HOME: "{{ mc_dir }}"
+    ANDROID_HOME: "{{ android_sdk_root_effective }}"
+    ANDROID_SDK_ROOT: "{{ android_sdk_root_effective }}"
+    ANDROID_USER_HOME: "{{ mc_dir }}/.android"
+    ANDROID_AVD_HOME: "{{ pixel_avd_home }}"
+  changed_when: false
+
+- name: Check Pixel SDK package marker paths
+  ansible.builtin.stat:
+    path: "{{ item.creates }}"
+  loop: "{{ pixel_sdk_packages }}"
+  register: pixel_sdk_package_marker_stats
+
+- name: Install missing Pixel SDK packages
+  ansible.builtin.command:
+    argv:
+      - "{{ android_sdkmanager }}"
+      - "--sdk_root={{ android_sdk_root_effective }}"
+      - "{{ item.item.name }}"
+    stdin: "y\n"
+  loop: "{{ pixel_sdk_package_marker_stats.results }}"
+  when: not item.stat.exists
+  environment:
+    HOME: "{{ mc_dir }}"
+    ANDROID_HOME: "{{ android_sdk_root_effective }}"
+    ANDROID_SDK_ROOT: "{{ android_sdk_root_effective }}"
+    ANDROID_USER_HOME: "{{ mc_dir }}/.android"
+    ANDROID_AVD_HOME: "{{ pixel_avd_home }}"
+
+- name: Re-check Pixel SDK package marker paths
+  ansible.builtin.stat:
+    path: "{{ item.creates }}"
+  loop: "{{ pixel_sdk_packages }}"
+  register: pixel_sdk_package_final_stats
+
+- name: Fail if a Pixel SDK package marker path is missing
+  ansible.builtin.fail:
+    msg: >-
+      Pixel SDK package '{{ item.item.name }}' did not create expected path:
+      {{ item.item.creates }}
+  loop: "{{ pixel_sdk_package_final_stats.results }}"
+  when: not item.stat.exists
+
+# ---------------------------------------------------------------------------
+# Install/create Pixel AVD directly in current model component directory
+# ---------------------------------------------------------------------------
+
+- name: Check whether Pixel AVD config already exists
+  ansible.builtin.stat:
+    path: "{{ pixel_avd_dir }}/config.ini"
+  register: pixel_avd_config_initial_stat
+
+- name: Check whether cached Pixel AVD archive exists
+  ansible.builtin.stat:
+    path: "{{ pixel_avd_archive }}"
+  register: pixel_avd_archive_stat
+  when:
+    - pixel_prefer_archive_if_present | default(true) | bool
+    - not pixel_avd_config_initial_stat.stat.exists
+
+- name: Extract cached Pixel AVD archive into current model component directory
+  ansible.builtin.unarchive:
+    src: "{{ pixel_avd_archive }}"
+    dest: "{{ mc_dir }}"
+    remote_src: true
+    creates: "{{ pixel_avd_dir }}/config.ini"
+  when:
+    - pixel_prefer_archive_if_present | default(true) | bool
+    - not pixel_avd_config_initial_stat.stat.exists
+    - pixel_avd_archive_stat.stat.exists | default(false)
+
+- name: Re-check whether Pixel AVD config exists after optional archive extraction
+  ansible.builtin.stat:
+    path: "{{ pixel_avd_dir }}/config.ini"
+  register: pixel_avd_config_after_archive_stat
+
+- name: Create Pixel AVD online with avdmanager
+  ansible.builtin.command:
+    argv:
+      - "{{ android_avdmanager }}"
+      - create
+      - avd
+      - --force
+      - --name
+      - "{{ pixel_avd_name }}"
+      - --package
+      - "{{ pixel_system_image_package }}"
+      - --path
+      - "{{ pixel_avd_dir }}"
+    stdin: "no\n"
+  args:
+    creates: "{{ pixel_avd_dir }}/config.ini"
+  when: not pixel_avd_config_after_archive_stat.stat.exists
+  environment:
+    HOME: "{{ mc_dir }}"
+    ANDROID_HOME: "{{ android_sdk_root_effective }}"
+    ANDROID_SDK_ROOT: "{{ android_sdk_root_effective }}"
+    ANDROID_USER_HOME: "{{ mc_dir }}/.android"
+    ANDROID_AVD_HOME: "{{ pixel_avd_home }}"
+
+- name: Verify Pixel AVD config exists
+  ansible.builtin.stat:
+    path: "{{ pixel_avd_dir }}/config.ini"
+  register: pixel_avd_config_final_creation_stat
+  failed_when: not pixel_avd_config_final_creation_stat.stat.exists
+
+# ---------------------------------------------------------------------------
+# Write Pixel_9a.ini directly in current model component directory
+# ---------------------------------------------------------------------------
+
+- name: Write relocatable Pixel AVD ini file
+  ansible.builtin.copy:
+    dest: "{{ pixel_avd_ini }}"
+    mode: "0644"
+    content: |
+      avd.ini.encoding=UTF-8
+      path={{ pixel_avd_template_base }}/.android/avd/{{ pixel_avd_name }}.avd
+      path.rel=avd/{{ pixel_avd_name }}.avd
+      target=android-{{ pixel_android_api_level }}
+
+- name: Validate relocatable Pixel AVD ini file
+  ansible.builtin.shell: |
+    set -eu
+
+    ini="{{ pixel_avd_ini }}"
+
+    grep -qx 'avd.ini.encoding=UTF-8' "$ini"
+    grep -qx 'path={{ pixel_avd_template_base }}/.android/avd/{{ pixel_avd_name }}.avd' "$ini"
+    grep -qx 'path.rel=avd/{{ pixel_avd_name }}.avd' "$ini"
+    grep -qx 'target=android-{{ pixel_android_api_level }}' "$ini"
+  args:
+    executable: /bin/sh
+  changed_when: false
+
+# ---------------------------------------------------------------------------
+# Clean and patch config.ini
+# ---------------------------------------------------------------------------
+
+- name: Find unresolved placeholder values in Pixel AVD config.ini
+  ansible.builtin.shell: |
+    set -eu
+    grep -En '^[^=]+=<[^>]+>$' "{{ pixel_avd_dir }}/config.ini" || true
+  args:
+    executable: /bin/sh
+  register: pixel_avd_placeholder_lines
+  changed_when: false
+
+- name: Report unresolved placeholder values in Pixel AVD config.ini
+  ansible.builtin.debug:
+    msg:
+      - "Removing unresolved placeholder-valued config.ini lines:"
+      - "{{ pixel_avd_placeholder_lines.stdout_lines }}"
+  when: pixel_avd_placeholder_lines.stdout | length > 0
+
+- name: Remove unresolved placeholder values from Pixel AVD config.ini
+  ansible.builtin.replace:
+    path: "{{ pixel_avd_dir }}/config.ini"
+    regexp: '(?m)^[^=\n]+=<[^>\n]+>\n?'
+    replace: ''
+
+- name: Ensure required Pixel AVD config values
+  ansible.builtin.lineinfile:
+    path: "{{ pixel_avd_dir }}/config.ini"
+    regexp: "^{{ item.key | regex_escape }}="
+    line: "{{ item.key }}={{ item.value }}"
+    create: true
+  loop: "{{ pixel_avd_required_config_values }}"
+
+- name: Remove unavailable explicit Pixel skin path
+  ansible.builtin.lineinfile:
+    path: "{{ pixel_avd_dir }}/config.ini"
+    regexp: "^skin\\.path="
+    state: absent
+  when: pixel_disable_named_skin | default(true) | bool
+
+- name: Ensure generic resolution-based Pixel skin config
+  ansible.builtin.lineinfile:
+    path: "{{ pixel_avd_dir }}/config.ini"
+    regexp: "^{{ item.key | regex_escape }}="
+    line: "{{ item.key }}={{ item.value }}"
+    create: true
+  loop:
+    - key: "showDeviceFrame"
+      value: "no"
+    - key: "skin.dynamic"
+      value: "yes"
+    - key: "skin.name"
+      value: "{{ pixel_fallback_skin_name }}"
+  when: pixel_disable_named_skin | default(true) | bool
+
+# ---------------------------------------------------------------------------
+# Remove stale derived/runtime state
+# ---------------------------------------------------------------------------
+
+- name: Remove stale Pixel AVD derived/runtime paths
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ pixel_avd_dir }}/hardware-qemu.ini"
+    - "{{ pixel_avd_dir }}/hardware-qemu.ini.lock"
+    - "{{ pixel_avd_dir }}/multiinstance.lock"
+    - "{{ pixel_avd_dir }}/cache.img.lock"
+    - "{{ pixel_avd_dir }}/userdata-qemu.img.lock"
+    - "{{ pixel_avd_dir }}/tmpAdbCmds"
+
+# ---------------------------------------------------------------------------
+# Optional sdcard.img creation
+# ---------------------------------------------------------------------------
+
+- name: Check Android mksdcard exists
+  ansible.builtin.stat:
+    path: "{{ android_mksdcard }}"
+  register: pixel_mksdcard_stat
+  when: pixel_create_sdcard_img | default(true) | bool
+
+- name: Create Pixel AVD sdcard image if missing
+  ansible.builtin.command:
+    argv:
+      - "{{ android_mksdcard }}"
+      - "{{ pixel_sdcard_size }}"
+      - "{{ pixel_sdcard_img }}"
+    creates: "{{ pixel_sdcard_img }}"
+  when:
+    - pixel_create_sdcard_img | default(true) | bool
+    - pixel_mksdcard_stat.stat.exists | default(false)
+
+# ---------------------------------------------------------------------------
+# Permissions normalization
+# ---------------------------------------------------------------------------
+
+- name: Ensure Pixel AVD directory is readable/searchable
+  ansible.builtin.file:
+    path: "{{ pixel_avd_dir }}"
+    state: directory
+    mode: "0755"
+
+- name: Ensure Pixel AVD ini is readable
+  ansible.builtin.file:
+    path: "{{ pixel_avd_ini }}"
+    mode: "0644"
+
+- name: Ensure Pixel AVD config.ini is readable
+  ansible.builtin.file:
+    path: "{{ pixel_avd_dir }}/config.ini"
+    mode: "0644"
+
+- name: Check whether Pixel AVD sdcard image exists
+  ansible.builtin.stat:
+    path: "{{ pixel_sdcard_img }}"
+  register: pixel_sdcard_img_stat
+  when: pixel_create_sdcard_img | default(true) | bool
+
+- name: Ensure Pixel AVD sdcard image is readable if present
+  ansible.builtin.file:
+    path: "{{ pixel_sdcard_img }}"
+    mode: "0644"
+  when:
+    - pixel_create_sdcard_img | default(true) | bool
+    - pixel_sdcard_img_stat.stat.exists | default(false)
+
+# ---------------------------------------------------------------------------
+# Validation
+# ---------------------------------------------------------------------------
+
+- name: Verify Pixel AVD referenced system image directory exists
+  ansible.builtin.stat:
+    path: "{{ android_sdk_root_effective }}/system-images/android-{{ pixel_android_api_level }}/{{ pixel_system_image_flavor }}/{{ pixel_system_image_arch }}"
+  register: pixel_system_image_dir_stat
+  failed_when: not pixel_system_image_dir_stat.stat.exists
+
+- name: Validate Pixel AVD config.ini
+  ansible.builtin.shell: |
+    set -eu
+
+    config="{{ pixel_avd_dir }}/config.ini"
+
+    if grep -En '^[^=]+=<[^>]+>$' "$config"; then
+      echo "Unresolved placeholder values remain in $config"
+      exit 1
+    fi
+
+    grep -qx 'abi.type={{ pixel_system_image_arch }}' "$config"
+    grep -qx 'hw.cpu.arch={{ pixel_system_image_arch }}' "$config"
+    grep -qx 'image.sysdir.1=system-images/android-{{ pixel_android_api_level }}/{{ pixel_system_image_flavor }}/{{ pixel_system_image_arch }}/' "$config"
+    grep -qx 'target=android-{{ pixel_android_api_level }}' "$config"
+
+    test "$(grep -c '^abi\.type=' "$config")" -eq 1
+    test "$(grep -c '^hw\.cpu\.arch=' "$config")" -eq 1
+    test "$(grep -c '^image\.sysdir\.1=' "$config")" -eq 1
+    test "$(grep -c '^target=' "$config")" -eq 1
+
+    if grep -q '^skin\.path=' "$config"; then
+      echo "Unexpected skin.path remains in $config"
+      exit 1
+    fi
+
+    if grep -q '^skin\.name=pixel_9a$' "$config"; then
+      echo "Unexpected unavailable pixel_9a skin remains in $config"
+      exit 1
+    fi
+  args:
+    executable: /bin/sh
+  changed_when: false
+
+- name: Print Pixel AVD installation summary
+  ansible.builtin.debug:
+    msg:
+      - "Pixel AVD name: {{ pixel_avd_name }}"
+      - "Pixel AVD dir: {{ pixel_avd_dir }}"
+      - "Pixel AVD ini: {{ pixel_avd_ini }}"
+      - "Android SDK root: {{ android_sdk_root_effective }}"
+      - "System image package: {{ pixel_system_image_package }}"

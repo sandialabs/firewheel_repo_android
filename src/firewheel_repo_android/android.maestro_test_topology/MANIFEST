@@ -1,0 +1,15 @@
+name: android.maestro_test_topology
+attributes:
+    depends:
+        - graph
+    provides:
+        - topology
+model_components:
+    depends:
+        - base_objects
+        - android.base_objects
+        - android.pixel9a
+        - android.maestro
+plugin: plugin.py
+vm_resources:
+    - vm_resources/**

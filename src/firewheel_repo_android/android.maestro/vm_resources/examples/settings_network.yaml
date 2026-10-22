@@ -1,0 +1,17 @@
+appId: com.android.settings
+---
+- launchApp
+
+- extendedWaitUntil:
+    visible: "Network & internet"
+    timeout: 15000
+
+- tapOn: "Network & internet"
+
+- extendedWaitUntil:
+    visible: "Internet"
+    timeout: 15000
+
+- assertVisible: "Internet"
+
+- takeScreenshot: settings-network
